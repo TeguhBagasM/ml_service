@@ -1,138 +1,204 @@
-"""
-Rule-based reasoning untuk menghasilkan alasan DITERIMA/DITOLAK.
-Rules mudah dikembangkan — cukup tambahkan di RULES list.
-"""
-
 import re
-from dataclasses import dataclass
-from typing import Optional
+from typing import List
 
 
-@dataclass
-class Rule:
-    """Representasi satu aturan pengecekan."""
-    name: str
-    check: callable     # Fungsi yang menerima (judul_original, judul_clean) → bool
-    reason: str         # Alasan jika rule terpenuhi → DITOLAK
-    reject: bool = True # True = rule ini menyebabkan penolakan
+# ─── KONFIGURASI ─────────────────────────────────────────────────────────────
 
-
-# ─── KATA KUNCI DOMAIN ───────────────────────────────────────────────────────
 KATA_METODE = {
     'algoritma', 'metode', 'klasifikasi', 'prediksi', 'analisis',
-    'deteksi', 'sistem', 'implementasi', 'penerapan', 'optimasi',
-    'segmentasi', 'clustering', 'regresi', 'forecasting', 'identifikasi',
-    'komparasi', 'perbandingan', 'evaluasi', 'naive', 'bayes', 'knn',
-    'svm', 'lstm', 'cnn', 'random', 'forest', 'decision', 'tree',
-    'neural', 'network', 'deep', 'learning', 'machine'
+    'deteksi', 'segmentasi', 'clustering', 'regresi', 'forecasting',
+    'identifikasi', 'komparasi', 'perbandingan', 'evaluasi', 'optimasi',
+    'rekomendasi', 'pengenalan', 'ekstraksi', 'implementasi',
+    # nama algoritma spesifik
+    'naive', 'bayes', 'knn', 'svm', 'lstm', 'cnn', 'rnn',
+    'random', 'forest', 'decision', 'tree', 'neural', 'network',
+    'deep', 'learning', 'machine', 'k-means', 'kmeans',
+    'xgboost', 'gradient', 'boosting', 'linear', 'logistic',
 }
 
-KATA_OBJEK = {
-    'data', 'teks', 'gambar', 'citra', 'suara', 'video', 'sensor',
-    'penyakit', 'cuaca', 'harga', 'saham', 'kredit', 'pelanggan',
-    'mahasiswa', 'siswa', 'pasien', 'produk', 'berita', 'ulasan',
-    'sentimen', 'emosi', 'wajah', 'sidik', 'tanaman', 'pertanian'
+KATA_OBJEK_PENELITIAN = {
+    # domain data
+    'data', 'teks', 'gambar', 'citra', 'suara', 'video', 'sinyal',
+    # domain aplikasi
+    'penyakit', 'cuaca', 'harga', 'saham', 'kredit', 'spam',
+    'pelanggan', 'mahasiswa', 'siswa', 'pasien', 'karyawan',
+    'produk', 'berita', 'ulasan', 'sentimen', 'emosi',
+    'wajah', 'sidik', 'tanaman', 'pertanian', 'curah',
+    'kelulusan', 'nilai', 'prestasi', 'penjualan', 'transaksi',
+    'jaringan', 'intrusi', 'hoaks', 'disinformasi', 'energi',
+    'listrik', 'suhu', 'kelembaban', 'gempa', 'banjir',
 }
 
-JUDUL_TERLALU_UMUM = {
-    'sistem informasi', 'aplikasi web', 'website', 'aplikasi mobile',
-    'sistem', 'aplikasi', 'website sekolah', 'toko online'
+# Frasa yang membuat judul TERLALU UMUM (harus muncul sebagai keseluruhan judul)
+FRASA_TERLALU_UMUM = [
+    'sistem informasi',
+    'aplikasi web',
+    'aplikasi mobile',
+    'website',
+    'sistem akademik',
+    'toko online',
+    'aplikasi android',
+    'sistem manajemen',
+]
+
+MIN_KATA = 5    # minimal kata dalam judul asli
+MAX_KATA = 25   # maksimal kata dalam judul asli
+
+# Singkatan: huruf besar semua, 2+ karakter, BUKAN kata umum
+KATA_BUKAN_SINGKATAN = {
+    'web', 'php', 'api', 'sql', 'css', 'html', 'iot', 'ai', 'ml',
+    'ui', 'ux', 'erp', 'crm', 'cms', 'url', 'http', 'json', 'xml',
+    # singkatan institusi/umum yang wajar
+    'pt', 'cv', 'smk', 'sma', 'smp', 'sd', 'rs', 'rsud', 'pln',
+    'bpjs', 'ktp', 'nik', 'nip', 'npm',
+    # akronim teknologi yang dikenal
+    'lstm', 'cnn', 'rnn', 'svm', 'knn', 'ann', 'mlp',
+    'naive', 'id',
 }
 
-JUDUL_TERLALU_PENDEK_KATA = 4   # Minimal 4 kata bermakna
-JUDUL_TERLALU_PANJANG_KATA = 25 # Maksimal 25 kata
+
+# ─── HELPER FUNCTIONS ────────────────────────────────────────────────────────
+
+def _words_original(judul: str) -> List[str]:
+    """Tokenisasi judul original (lowercase)."""
+    return judul.lower().split()
 
 
-def _has_kata_metode(judul_original: str, judul_clean: str) -> bool:
-    """Cek apakah judul mengandung kata metode/teknik."""
-    words = set(judul_original.lower().split())
-    return bool(words & KATA_METODE)
-
-
-def _has_kata_objek(judul_original: str, judul_clean: str) -> bool:
-    """Cek apakah judul mengandung objek/domain penelitian."""
-    words = set(judul_original.lower().split())
-    return bool(words & KATA_OBJEK)
-
-
-def _is_terlalu_umum(judul_original: str, judul_clean: str) -> bool:
-    """Cek apakah judul terlalu generik/umum."""
-    judul_lower = judul_original.lower().strip()
-    # Cek exact match atau judul hanya berisi frasa umum
-    for frasa in JUDUL_TERLALU_UMUM:
-        if judul_lower == frasa or judul_lower.startswith(frasa + ' ') \
-                and len(judul_lower.split()) <= 4:
+def _has_metode(judul: str) -> bool:
+    """Apakah judul mengandung kata metode/algoritma."""
+    words = set(_words_original(judul))
+    # Cek juga substring (misal 'k-nearest' mengandung 'nearest')
+    judul_lower = judul.lower()
+    for kata in KATA_METODE:
+        if kata in judul_lower:
             return True
     return False
 
 
-def _is_terlalu_pendek(judul_original: str, judul_clean: str) -> bool:
-    """Cek apakah judul terlalu pendek."""
-    kata_bersih = judul_clean.split()
-    return len(kata_bersih) < JUDUL_TERLALU_PENDEK_KATA
+def _has_objek(judul: str) -> bool:
+    """Apakah judul mengandung objek penelitian spesifik."""
+    judul_lower = judul.lower()
+    for kata in KATA_OBJEK_PENELITIAN:
+        if kata in judul_lower:
+            return True
+    return False
 
 
-def _is_terlalu_panjang(judul_original: str, judul_clean: str) -> bool:
-    """Cek apakah judul terlalu panjang."""
-    kata = judul_original.split()
-    return len(kata) > JUDUL_TERLALU_PANJANG_KATA
+def _is_terlalu_umum(judul: str) -> bool:
+    """
+    Judul terlalu umum jika:
+    - Sama persis dengan frasa umum, ATAU
+    - Hanya terdiri dari frasa umum + sedikit kata tambahan (≤ 3 kata)
+    """
+    judul_lower = judul.lower().strip()
+    kata = judul_lower.split()
+
+    for frasa in FRASA_TERLALU_UMUM:
+        frasa_kata = frasa.split()
+        # Judul persis sama
+        if judul_lower == frasa:
+            return True
+        # Judul dimulai dengan frasa umum dan total kata sedikit
+        if judul_lower.startswith(frasa) and len(kata) <= len(frasa_kata) + 3:
+            return True
+
+    return False
 
 
-def _has_singkatan_tidak_jelas(judul_original: str, judul_clean: str) -> bool:
-    """Cek singkatan berlebihan (≥ 3 singkatan sekaligus)."""
-    singkatan = re.findall(r'\b[A-Z]{2,}\b', judul_original)
-    return len(singkatan) >= 3
+def _is_terlalu_pendek(judul: str) -> bool:
+    """Judul terlalu pendek (< MIN_KATA kata)."""
+    return len(judul.split()) < MIN_KATA
 
 
-# ─── DAFTAR RULES ────────────────────────────────────────────────────────────
-RULES = [
-    Rule(
-        name="terlalu_pendek",
-        check=_is_terlalu_pendek,
-        reason="Judul terlalu pendek. Tambahkan objek penelitian dan metode yang digunakan."
-    ),
-    Rule(
-        name="terlalu_panjang",
-        check=_is_terlalu_panjang,
-        reason=f"Judul terlalu panjang (lebih dari {JUDUL_TERLALU_PANJANG_KATA} kata). Sederhanakan judul."
-    ),
-    Rule(
-        name="terlalu_umum",
-        check=_is_terlalu_umum,
-        reason="Judul terlalu umum dan tidak spesifik. Tambahkan metode, objek, dan konteks penelitian."
-    ),
-    Rule(
-        name="tidak_ada_metode",
-        check=lambda o, c: not _has_kata_metode(o, c),
-        reason="Judul tidak mencantumkan metode atau algoritma yang digunakan."
-    ),
-    Rule(
-        name="tidak_ada_objek",
-        check=lambda o, c: not _has_kata_objek(o, c),
-        reason="Judul tidak mencantumkan objek atau domain penelitian yang jelas."
-    ),
-    Rule(
-        name="singkatan_berlebihan",
-        check=_has_singkatan_tidak_jelas,
-        reason="Terlalu banyak singkatan. Tulis kepanjangan singkatan agar judul lebih jelas."
-    ),
-]
+def _is_terlalu_panjang(judul: str) -> bool:
+    """Judul terlalu panjang (> MAX_KATA kata)."""
+    return len(judul.split()) > MAX_KATA
 
+
+def _has_singkatan_berlebihan(judul: str) -> bool:
+    """
+    Singkatan berlebihan = ada 3+ token yang:
+    - Semua huruf kapital
+    - Panjang 2-6 karakter
+    - BUKAN kata yang dikenal (teknologi, institusi, dll)
+    - BUKAN nama algoritma
+    """
+    tokens = judul.split()
+    singkatan_asing = []
+
+    for token in tokens:
+        # Bersihkan tanda baca
+        token_clean = re.sub(r'[^A-Za-z]', '', token)
+        if (
+            len(token_clean) >= 2
+            and len(token_clean) <= 6
+            and token_clean == token_clean.upper()        # semua kapital
+            and token_clean.lower() not in KATA_BUKAN_SINGKATAN
+            and not token_clean.isdigit()
+        ):
+            singkatan_asing.append(token_clean)
+
+    return len(singkatan_asing) >= 3
+
+
+# ─── EVALUASI RULES ──────────────────────────────────────────────────────────
 
 def get_rejection_reason(judul_original: str, judul_clean: str) -> str:
     """
-    Evaluasi semua rules dan kembalikan alasan penolakan.
-    
+    Evaluasi semua rules dan kembalikan alasan.
+
     Returns:
-        String alasan penolakan, atau pesan diterima jika semua lolos.
+        String alasan penolakan, atau pesan diterima.
     """
     violations = []
-    
-    for rule in RULES:
-        if rule.check(judul_original, judul_clean):
-            violations.append(f"• {rule.reason}")
-    
+
+    # Rule 1: Terlalu pendek
+    if _is_terlalu_pendek(judul_original):
+        violations.append(
+            f"Judul terlalu pendek (kurang dari {MIN_KATA} kata). "
+            "Tambahkan metode dan objek penelitian."
+        )
+
+    # Rule 2: Terlalu panjang
+    if _is_terlalu_panjang(judul_original):
+        violations.append(
+            f"Judul terlalu panjang (lebih dari {MAX_KATA} kata). Sederhanakan."
+        )
+
+    # Rule 3: Terlalu umum
+    if _is_terlalu_umum(judul_original):
+        violations.append(
+            "Judul terlalu umum dan tidak spesifik. "
+            "Tambahkan metode, objek penelitian, dan konteks yang jelas."
+        )
+
+    # Rule 4: Tidak ada metode (hanya jika judul tidak terlalu umum/pendek)
+    if not _is_terlalu_pendek(judul_original) and not _has_metode(judul_original):
+        violations.append(
+            "Judul tidak mencantumkan metode atau algoritma yang digunakan. "
+            "Contoh: 'Menggunakan Algoritma Decision Tree' atau 'Berbasis Machine Learning'."
+        )
+
+    # Rule 5: Tidak ada objek penelitian
+    if not _is_terlalu_pendek(judul_original) and not _has_objek(judul_original):
+        violations.append(
+            "Judul tidak mencantumkan objek atau domain penelitian yang spesifik. "
+            "Contoh: data penjualan, penyakit diabetes, ulasan pelanggan."
+        )
+
+    # Rule 6: Singkatan berlebihan (hanya jika bukan karena terlalu pendek)
+    if not _is_terlalu_pendek(judul_original) and _has_singkatan_berlebihan(judul_original):
+        violations.append(
+            "Terlalu banyak singkatan yang tidak umum. "
+            "Tulis kepanjangan singkatan agar judul lebih mudah dipahami."
+        )
+
+    # ── Output ───────────────────────────────────────────────────
     if violations:
-        return "Judul ditolak karena:\n" + "\n".join(violations)
-    
-    return "Judul sudah sesuai. Mengandung metode yang jelas, objek penelitian, dan panjang yang tepat."
+        alasan_list = "\n".join(f"• {v}" for v in violations)
+        return f"Judul ditolak karena:\n{alasan_list}"
+
+    return (
+        "Judul sudah sesuai. Mengandung metode yang jelas, "
+        "objek penelitian spesifik, dan panjang yang tepat."
+    )
