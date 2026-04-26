@@ -1,14 +1,20 @@
+import sys
+import os
+
+# Fix import path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from flask import Flask, request, jsonify
 import joblib
-import os
 from app.preprocessing import preprocess_text
 from app.rules import get_rejection_reason
 
 app = Flask(__name__)
 
-# ─── LOAD MODEL & VECTORIZER ─────────────────────────────────────────────────
-MODEL_PATH      = 'model/model.pkl'
-VECTORIZER_PATH = 'model/vectorizer.pkl'
+# ── Gunakan absolute path agar tidak bergantung working directory ──
+BASE_DIR        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_PATH      = os.path.join(BASE_DIR, 'model', 'model.pkl')
+VECTORIZER_PATH = os.path.join(BASE_DIR, 'model', 'vectorizer.pkl')
 
 try:
     model      = joblib.load(MODEL_PATH)
@@ -18,7 +24,6 @@ except FileNotFoundError as e:
     print(f"[✗] File tidak ditemukan: {e}")
     print("[!] Jalankan 'python train.py' terlebih dahulu.")
     model = vectorizer = None
-
 
 # ─── HELPER ──────────────────────────────────────────────────────────────────
 def predict_judul(judul: str) -> dict:
